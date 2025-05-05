@@ -1,0 +1,3 @@
+google-generativeai
+pysubs2
+google-api-core
