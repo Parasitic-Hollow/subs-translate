@@ -305,10 +305,10 @@ def translate_subtitles_recursive(client, model_name, subs, chunk_size, force_ap
                     # Loop will re-evaluate translated_chunk
 
             elif translated_chunk == "[Blocked by Safety Filter]":
-               print(f"  Translatable chunk starting at index {processed_translatable_idx} blocked by safety filter. Adding placeholder.", file=sys.stderr)
-               lines_added_this_iteration = ["[Blocked by Safety Filter]" for _ in range(expected_chunk_len)]
-               lines_processed_this_iteration = expected_chunk_len # Mark original chunk lines as processed (blocked)
-               break # Exit retry loop
+                print(f"  Translatable chunk starting at index {processed_translatable_idx} blocked by safety filter. Adding placeholder.", file=sys.stderr)
+                lines_added_this_iteration = ["[Blocked by Safety Filter]" for _ in range(expected_chunk_len)]
+                lines_processed_this_iteration = expected_chunk_len # Mark original chunk lines as processed (blocked)
+                break # Exit retry loop
 
             else: # Initial or retry translation was successful text
                 chunk_translated_lines = translated_chunk.splitlines()
@@ -319,63 +319,86 @@ def translate_subtitles_recursive(client, model_name, subs, chunk_size, force_ap
                 if last_translated_chunk_len == last_sent_chunk_len:
                     # Success! The last attempt (initial or retry) worked for the size attempted.
                     print(f"  Successfully translated translatable chunk of size {last_sent_chunk_len} starting at index {processed_translatable_idx}.")
+                    # --- Strip HTML-like tags ---
+                    cleaned_lines = []
+                    for i, line in enumerate(chunk_translated_lines):
+                        if '<' in line and '>' in line:
+                            original_line_preview = line[:60] + '...' if len(line) > 60 else line
+                            stripped_line = re.sub(r"<[^>]+>", "", line).strip()
+                            if stripped_line != line: # Log only if something was actually stripped
+                                print(f"    Stripped tags from line {i+1} (original index {lines_to_translate_info[processed_translatable_idx + i][0]+1}): '{original_line_preview}' -> '{stripped_line}'")
+                            cleaned_lines.append(stripped_line)
+                        else:
+                            cleaned_lines.append(line)
+                    chunk_translated_lines = cleaned_lines # Replace with cleaned lines
+                    # --- End Strip HTML-like tags ---
                     lines_added_this_iteration = chunk_translated_lines
                     lines_processed_this_iteration = last_sent_chunk_len # Advance by the number of lines successfully processed
                     break # Exit retry loop
-                else:
+                elif len(chunk_translated_lines) != last_sent_chunk_len:
                     # Mismatch occurred on the last attempt
                     print(f"    Warning: Mismatch on attempt with size {last_sent_chunk_len} starting at translatable index {processed_translatable_idx}. Original: {last_sent_chunk_len}, Translated: {last_translated_chunk_len}", file=sys.stderr)
                     if force_apply_mismatch:
                         print("    Applying mismatched translation due to --force-apply-mismatch.")
                         if last_translated_chunk_len < last_sent_chunk_len:
                             chunk_translated_lines.extend(["[Missing Translation]"] * (last_sent_chunk_len - last_translated_chunk_len))
-                        else:
+                        else: # last_translated_chunk_len >= last_sent_chunk_len
                             chunk_translated_lines = chunk_translated_lines[:last_sent_chunk_len]
+                        # --- Strip HTML-like tags (only when force applying) ---
+                        cleaned_lines = []
+                        for i, line in enumerate(chunk_translated_lines):
+                            if '<' in line and '>' in line:
+                                original_line_preview = line[:60] + '...' if len(line) > 60 else line
+                                stripped_line = re.sub(r"<[^>]+>", "", line).strip()
+                                if stripped_line != line: # Log only if something was actually stripped
+                                    print(f"    Stripped tags from line {i+1} (original index {lines_to_translate_info[processed_translatable_idx + i][0]+1}): '{original_line_preview}' -> '{stripped_line}'")
+                                cleaned_lines.append(stripped_line)
+                            else:
+                                cleaned_lines.append(line)
+                        chunk_translated_lines = cleaned_lines # Replace with cleaned lines
+                        # --- End Strip HTML-like tags ---
                         lines_added_this_iteration = chunk_translated_lines
                         lines_processed_this_iteration = last_sent_chunk_len # Advance by the number of lines attempted
-                        break # Exit retry loop
+                        break # Exit retry loop (force apply)
                     elif retry_chunk_size <= 1: # Mismatch occurred even with size 1
                         # --- Single Translatable Line Mismatch Logic ---
+                        current_translatable_line_index = processed_translatable_idx # Index of the single line causing mismatch
                         if fallback_model_name:
                             fallback_count = fallback_attempts.get(current_translatable_line_index, 0)
                             if fallback_count < 3:
                                 fallback_attempts[current_translatable_line_index] = fallback_count + 1
-                                print(f"  Line count mismatch for single translatable line (original index {lines_to_translate_info[current_translatable_line_index][0]+1}). Attempting fallback model (try {fallback_count + 1}/3): {fallback_model_name}")
+                                print(f"    Line count mismatch for single translatable line (original index {lines_to_translate_info[current_translatable_line_index][0]+1}). Attempting fallback model (try {fallback_count + 1}/3): {fallback_model_name}")
                                 single_line_text_list = translatable_texts[current_translatable_line_index:min(current_translatable_line_index + 1, total_translatable_lines)]
                                 if not single_line_text_list:
-                                    print(f"  Error: Fallback retry slicing resulted in empty translatable chunk at index {current_translatable_line_index}. Skipping.", file=sys.stderr)
+                                    print(f"    Error: Fallback retry slicing resulted in empty translatable chunk at index {current_translatable_line_index}. Skipping.", file=sys.stderr)
                                     lines_added_this_iteration = ["[Fallback Slicing Error]"]
                                     lines_processed_this_iteration = 1
                                     break # Exit inner while loop
                                 single_line_text = "\n".join(single_line_text_list)
+                                # Use the *original* client and model unless fallback is explicitly different
                                 translated_chunk = translate_chunk(client, fallback_model_name, single_line_text, system_prompt=system_prompt, timeout=current_timeout, full_srt_context=full_srt_context)
-                                continue # Re-evaluate the result
-                            else:
-                                print(f"  Failed single translatable line (original index {lines_to_translate_info[current_translatable_line_index][0]+1}) due to mismatch after 3 fallback attempts.", file=sys.stderr)
+                                # Don't break or set lines_added/processed here, let the loop re-evaluate translated_chunk
+                                continue # Re-evaluate the result with the fallback translation
+                            else: # Failed after 3 fallback attempts
+                                print(f"    Failed single translatable line (original index {lines_to_translate_info[current_translatable_line_index][0]+1}) due to mismatch after 3 fallback attempts.", file=sys.stderr)
                                 lines_added_this_iteration = ["[Translation Mismatch]"]
                                 lines_processed_this_iteration = 1
-                                break
-                        else:
-                            print(f"  Line count mismatch for single translatable line (original index {lines_to_translate_info[current_translatable_line_index][0]+1}). No fallback. Skipping line.", file=sys.stderr)
+                                break # Exit inner while loop (failed fallback)
+                        else: # No fallback model configured
+                            print(f"    Line count mismatch for single translatable line (original index {lines_to_translate_info[current_translatable_line_index][0]+1}). No fallback. Skipping line.", file=sys.stderr)
                             lines_added_this_iteration = ["[Translation Mismatch]"]
                             lines_processed_this_iteration = 1
-                            break
+                            break # Exit inner while loop (no fallback)
                         # --- End Single Translatable Line Mismatch Logic ---
-                    else:
-                         # Prepare for retry with smaller size due to mismatch
-                         retry_chunk_size = max(1, retry_chunk_size - 5)
-                         print(f"  Line count mismatch detected. Retrying locally with chunk size {retry_chunk_size}.")
-                         # Re-slice the chunk using the smaller retry_chunk_size from translatable_texts
-                         chunk_to_translate_retry_list = translatable_texts[processed_translatable_idx:min(processed_translatable_idx + retry_chunk_size, total_translatable_lines)]
-                         if not chunk_to_translate_retry_list:
-                              print(f"  Error: Retry slicing resulted in empty translatable chunk at index {processed_translatable_idx}. Skipping original chunk attempt.", file=sys.stderr)
-                              lines_added_this_iteration = ["[Retry Slicing Error]" for _ in range(expected_chunk_len)]
-                              lines_processed_this_iteration = expected_chunk_len
-                              break
-                         chunk_to_translate_retry = "\n".join(chunk_to_translate_retry_list)
-                         # Retry the translation with the smaller chunk
-                         translated_chunk = translate_chunk(client, model_name, chunk_to_translate_retry, system_prompt=system_prompt, timeout=current_timeout, full_srt_context=full_srt_context)
-                         # Loop will re-evaluate translated_chunk
+                    else: # Mismatch, but can retry with smaller chunk
+                        retry_chunk_size = max(1, retry_chunk_size // 2) # Halve chunk size
+                        print(f"    Retrying with smaller chunk size: {retry_chunk_size}")
+                        # No break here, continue the inner while loop to retry with the new smaller chunk size
+                        # The outer loop will re-slice based on the updated retry_chunk_size
+                        chunk_to_translate_retry = "\n".join(chunk_to_translate_retry_list)
+                        # Retry the translation with the smaller chunk
+                        translated_chunk = translate_chunk(client, model_name, chunk_to_translate_retry, system_prompt=system_prompt, timeout=current_timeout, full_srt_context=full_srt_context)
+                        # Loop will re-evaluate translated_chunk
 
         # --- End Local Retry Logic ---
 
@@ -388,6 +411,11 @@ def translate_subtitles_recursive(client, model_name, subs, chunk_size, force_ap
              print(f"  Error: Internal logic error processing translatable chunk at index {processed_translatable_idx}. Skipping original chunk attempt.", file=sys.stderr)
              all_translated_results.extend(["[Internal Logic Error]" for _ in range(expected_chunk_len)])
              processed_translatable_idx += expected_chunk_len # Advance by original chunk size to avoid infinite loop
+
+        # --- API Delay ---
+        if args and args.api_delay > 0:
+            print(f"  Applying API delay: {args.api_delay}s")
+            time.sleep(args.api_delay)
 
     # --- Apply Translated Results Back ---
     if len(all_translated_results) != total_translatable_lines:
@@ -619,6 +647,7 @@ def main():
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help=f"Timeout per translation API call (default: {DEFAULT_TIMEOUT}s).")
     parser.add_argument("--system-prompt-file", help="Path to system prompt text file.")
     parser.add_argument("--fallback-model", help="Fallback model to try once on persistent single-line errors.")
+    parser.add_argument("--api-delay", type=float, default=0.0, help="Optional delay in seconds between translation API calls for each chunk.")
     # Add parallel argument
     default_workers = os.cpu_count() if hasattr(os, 'cpu_count') else 4 # Default to 4 if cpu_count not available
     parser.add_argument("--parallel", nargs='?', type=int, const=default_workers, default=None,
